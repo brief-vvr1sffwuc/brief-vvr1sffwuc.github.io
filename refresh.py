@@ -18,6 +18,11 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 
+try:                      # inside the package on the Mac; a plain file next to this one on GitHub
+    from . import mood_core
+except ImportError:       # pragma: no cover
+    import mood_core
+
 UTC_OFFSET = 0      # seconds east of UTC for the times shown (set from the state: your Mac's time zone)
 
 TAGS = {"positive": "pos", "neutral": "neu", "negative": "neg"}
@@ -661,7 +666,41 @@ def update_prices(state: dict, key: str, now: datetime, get, wait) -> int:
     return added
 
 
-def refresh(folder: str, key: str, now: datetime | None = None, get=None, wait=None) -> str:
+FRED_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id="
+
+
+def mood_dict(m, allowed: dict | None) -> dict:
+    """A mood reading as the page shows it, with the sentence its test allows."""
+    if allowed is None:
+        proof = "Context only: not yet tested (uv run event-model mood --test)."
+    elif m.label == "Fear" and allowed.get("Fear"):
+        proof = "In the test, months like this were followed by higher Nasdaq-100 returns than other months."
+    elif m.label == "Greed" and allowed.get("Greed"):
+        proof = "In the test, months like this were followed by lower Nasdaq-100 returns than other months."
+    else:
+        proof = "Context only: in the test, the mood didn't predict the market's returns."
+    return {"label": m.label, "score": m.score, "day": m.day, "vix": m.vix, "fear": m.fear, "heat": m.heat, "proof": proof}
+
+
+def _text_getter(url: str) -> str:
+    with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "briefing-refresh"}), timeout=60) as resp:
+        return resp.read().decode("utf-8")
+
+
+def update_mood(state: dict, get_text=None) -> bool:
+    """Work the market mood out again from FRED's latest VIX and Nasdaq-100 (free, no key). True
+    if it moved to a newer day. FRED posts a day's values the next morning, US time."""
+    get_text = get_text or _text_getter
+    vix = mood_core.parse_series(get_text(FRED_URL + "VIXCLS"))
+    index = mood_core.parse_series(get_text(FRED_URL + "NASDAQ100"))
+    readings = mood_core.compute(vix, index)
+    if not readings or (state.get("mood") and readings[-1].day <= state["mood"].get("day", "")):
+        return False
+    state["mood"] = mood_dict(readings[-1], state.get("mood_allowed"))
+    return True
+
+
+def refresh(folder: str, key: str, now: datetime | None = None, get=None, wait=None, get_text=None) -> str:
     """Rebuild index.html in a folder from its state.json, with fresh news and any new day's
     closing prices. Returns a summary."""
     now = now or datetime.now(timezone.utc)
@@ -678,7 +717,12 @@ def refresh(folder: str, key: str, now: datetime | None = None, get=None, wait=N
     except Exception as e:           # prices are a bonus: the news refresh carries on without them
         new_days = 0
         print(f"(prices not refreshed: {e})")
-    if new_days:
+    try:
+        new_mood = update_mood(state, get_text)
+    except Exception as e:           # so is the mood
+        new_mood = False
+        print(f"(mood not refreshed: {e})")
+    if new_days or new_mood:
         with open(os.path.join(folder, "state.json"), "w", encoding="utf-8") as f:
             json.dump(state, f)
     window = (now - timedelta(days=int(state.get("news_days", 3)))).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -696,7 +740,8 @@ def refresh(folder: str, key: str, now: datetime | None = None, get=None, wait=N
     with open(os.path.join(folder, "index.html"), "w", encoding="utf-8") as f:
         f.write(html_page)
     return (f"{len(fresh)} new rows; {counts['articles']} articles about {counts['stocks']} stocks on the page; "
-            f"{new_days} new day{'s' if new_days != 1 else ''} of prices (to {state.get('last_day')})")
+            f"{new_days} new day{'s' if new_days != 1 else ''} of prices (to {state.get('last_day')}); "
+            f"mood {'updated' if new_mood else 'unchanged'} ({(state.get('mood') or {}).get('day')})")
 
 
 if __name__ == "__main__":
