@@ -162,6 +162,14 @@ details.help p { margin: 6px 0; }
 dl { margin: 6px 0; } dt { font-weight: 700; color: var(--fg); margin-top: 8px; } dd { margin: 0; }
 footer { margin-top: 36px; font-size: 14px; color: var(--muted); }
 button { font: inherit; color: inherit; }
+.form { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px; }
+.form select, .form input, textarea { font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--line);
+  border-radius: 10px; padding: 9px 10px; width: 100%; min-width: 0; }
+.form select:first-child, .form input[type=text], .form .add { grid-column: 1 / -1; }
+.x { background: none; border: 0; color: var(--muted); font-size: 18px; cursor: pointer; padding: 0 0 0 8px; }
+.totals { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 10px 0; }
+.totals div { background: var(--soft); border-radius: 10px; padding: 8px 10px; } .totals b { display: block; font-size: 20px; }
+.caution { border-left: 4px solid var(--warn); padding: 6px 10px; margin: 8px 0; font-size: 15px; }
 .add { background: var(--accent); color: #fff; border: 0; border-radius: 999px; padding: 8px 16px; font-weight: 700; cursor: pointer; }
 @media (prefers-color-scheme: dark) { .add { color: #10161d; } }
 .star { float: right; background: none; border: 0; font-size: 22px; line-height: 1; padding: 0 0 0 10px; cursor: pointer; color: var(--muted); }
@@ -263,7 +271,94 @@ SCRIPT = """
     var t = ev.target.getAttribute && ev.target.getAttribute('data-star');
     if (t) { ev.preventDefault(); ev.stopPropagation(); toggle(t); }
   });
-  draw();
+  // ---- holdings and decisions (kept in this browser only)
+  function load(key) { try { return JSON.parse(localStorage.getItem(key) || '[]'); } catch (e) { return []; } }
+  function store(key, v) { try { localStorage.setItem(key, JSON.stringify(v)); } catch (e) {} }
+  var holds = load('briefing.holdings').filter(function (h) { return STOCKS[h.t]; });
+  var journal = load('briefing.journal');
+  function money(x) { return (x < 0 ? '-$' : '$') + Math.abs(x).toLocaleString('en-US', { maximumFractionDigits: 0 }); }
+  function options(id) {
+    document.getElementById(id).innerHTML = Object.keys(STOCKS).sort(function (a, b) { return STOCKS[a].name.localeCompare(STOCKS[b].name); })
+      .map(function (t) { return '<option value="' + t + '">' + esc(STOCKS[t].name) + ' (' + esc(t) + ')</option>'; }).join('');
+  }
+  function drawHoldings() {
+    var total = 0, before = 0, paid = 0, html = '', byType = {}, warn = '';
+    holds.forEach(function (h) { var s = STOCKS[h.t]; if (s.close) { total += h.n * s.close; } });
+    holds.forEach(function (h, i) {
+      var s = STOCKS[h.t];
+      if (!s.close) { html += '<div class="line"><span><b>' + esc(s.name) + '</b><br><span class="small muted">no price yet</span></span><button class="x" data-drop-hold="' + i + '" aria-label="Remove">×</button></div>'; return; }
+      var value = h.n * s.close, was = s.d1 === null || s.d1 === undefined ? value : value / (1 + s.d1);
+      before += was; paid += h.n * h.p; byType[s.what] = (byType[s.what] || 0) + value;
+      html += '<div class="line"><span><b>' + esc(s.name) + '</b> <span class="muted small">' + h.n + ' shares · ' + (100 * value / total).toFixed(0) + '% of your holdings</span><br>' +
+        '<span class="small">Worth ' + money(value) + ' · since you bought ' + pct(h.p ? s.close / h.p - 1 : null) + ' (' + money(value - h.n * h.p) + ')</span></span>' +
+        '<span class="small" style="text-align:right;white-space:nowrap">' + pct(s.d1) + '<button class="x" data-drop-hold="' + i + '" aria-label="Remove">×</button></span></div>';
+      if (value / total > 0.3 && holds.length > 1) { warn += '<div class="caution">' + esc(s.name) + ' is ' + (100 * value / total).toFixed(0) + '% of your holdings. A big fall in one stock would hit you hard.</div>'; }
+    });
+    Object.keys(byType).forEach(function (k) {
+      if (byType[k] / total > 0.5 && Object.keys(byType).length > 1) { warn += '<div class="caution">' + (100 * byType[k] / total).toFixed(0) + '% of your holdings are in one kind of company (' + esc(k.toLowerCase()) + '). They tend to rise and fall together.</div>'; }
+    });
+    document.getElementById('hold-list').innerHTML = html;
+    document.getElementById('hold-warn').innerHTML = warn;
+    document.getElementById('hold-total').innerHTML = total ? '<div class="totals"><div><span class="small muted">Worth now</span><b>' + money(total) + '</b></div>' +
+      '<div><span class="small muted">On ' + esc(MARKET.label || '') + '</span><b>' + pct(before ? total / before - 1 : null) + '</b><span class="small muted">' + money(total - before) + ' · big tech ' + pct(MARKET.qqq_d1) + '</span></div>' +
+      '<div><span class="small muted">You paid</span><b>' + money(paid) + '</b></div><div><span class="small muted">Gain or loss so far</span><b>' + pct(paid ? total / paid - 1 : null) + '</b><span class="small muted">' + money(total - paid) + '</span></div></div>' : '';
+  }
+  function drawJournal() {
+    document.getElementById('journal-list').innerHTML = journal.map(function (j, i) {
+      var s = STOCKS[j.t], since = '';
+      if (s && s.close && j.p) {
+        since = '<br><span class="small">Since then: ' + esc(s.name) + ' ' + pct(s.close / j.p - 1) + (j.q && MARKET.qqq ? ' · big tech ' + pct(MARKET.qqq / j.q - 1) : '') + '</span>';
+      }
+      return '<div class="line"><span><b>' + esc(j.a) + ' ' + esc(s ? s.name : j.t) + '</b> <span class="muted small">' + esc(j.d) + '</span><br>' +
+        '<span class="small">' + esc(j.note || '') + '</span>' + since + '</span><button class="x" data-drop-journal="' + i + '" aria-label="Remove">×</button></div>';
+    }).join('') || '<p class="muted small">No decisions written down yet.</p>';
+  }
+  function drawBackup() {
+    document.getElementById('backup-text').value = JSON.stringify({ mine: mine, holdings: holds, journal: journal });
+  }
+  function drawComing() {
+    Array.prototype.forEach.call(document.querySelectorAll('[data-coming]'), function (row) {
+      var t = row.getAttribute('data-coming'), owned = holds.some(function (h) { return h.t === t; });
+      if ((owned || mine.indexOf(t) >= 0) && row.firstChild.textContent.indexOf('★') < 0) { row.firstChild.textContent = '★ ' + row.firstChild.textContent; }
+    });
+  }
+  function redraw() { draw(); drawHoldings(); drawJournal(); drawBackup(); drawComing(); }
+  options('hold-ticker'); options('journal-ticker');
+  document.getElementById('hold-add').addEventListener('click', function () {
+    var t = document.getElementById('hold-ticker').value, n = parseFloat(document.getElementById('hold-shares').value),
+      p = parseFloat(document.getElementById('hold-cost').value);
+    if (!STOCKS[t] || !(n > 0) || !(p > 0)) { return; }
+    holds.push({ t: t, n: n, p: p }); store('briefing.holdings', holds);
+    if (mine.indexOf(t) < 0) { mine.push(t); save(); }
+    document.getElementById('hold-shares').value = ''; document.getElementById('hold-cost').value = '';
+    redraw();
+  });
+  document.getElementById('journal-add').addEventListener('click', function () {
+    var t = document.getElementById('journal-ticker').value, note = document.getElementById('journal-note').value.trim();
+    if (!STOCKS[t] || !note) { return; }
+    journal.unshift({ d: new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }), t: t, a: document.getElementById('journal-action').value, note: note.slice(0, 300),
+      p: STOCKS[t].close || null, q: MARKET.qqq || null });
+    store('briefing.journal', journal); document.getElementById('journal-note').value = ''; redraw();
+  });
+  document.addEventListener('click', function (ev) {
+    var a = ev.target.getAttribute && ev.target.getAttribute('data-drop-hold'), b = ev.target.getAttribute && ev.target.getAttribute('data-drop-journal');
+    if (a !== null && a !== undefined) { holds.splice(parseInt(a, 10), 1); store('briefing.holdings', holds); redraw(); }
+    if (b !== null && b !== undefined) { journal.splice(parseInt(b, 10), 1); store('briefing.journal', journal); redraw(); }
+  });
+  document.getElementById('backup-load').addEventListener('click', function () {
+    var note = document.getElementById('backup-note');
+    try {
+      var data = JSON.parse(document.getElementById('backup-text').value);
+      mine = (data.mine || []).filter(function (t) { return STOCKS[t]; });
+      holds = (data.holdings || []).filter(function (h) { return STOCKS[h.t] && h.n > 0 && h.p > 0; });
+      journal = (data.journal || []).filter(function (j) { return j && j.t && j.a; });
+      save(); store('briefing.holdings', holds); store('briefing.journal', journal); redraw();
+      note.textContent = 'Loaded.';
+    } catch (e) { note.textContent = "That text isn't a backup from this page."; }
+  });
+  var toggleMine = toggle;
+  toggle = function (t) { toggleMine(t); drawBackup(); drawComing(); };
+  redraw();
 })();
 """
 
@@ -315,6 +410,8 @@ def page(state: dict, news_by: dict[str, list[dict]], adverts: int, newest: str 
                      key=lambda kv: (-len(filed.get(kv[0], [])) - sum(1 for r in kv[1] if kind(r) != "opinion"),
                                      -len(kv[1]), kv[0]))
     most = max(news_by.items(), key=lambda kv: len(kv[1]), default=None)
+    today = state.get("today") or ""
+    coming = [c for c in state.get("coming") or [] if c["day"] >= today]
 
     # ---- at a glance
     glance = []
@@ -335,6 +432,11 @@ def page(state: dict, news_by: dict[str, list[dict]], adverts: int, newest: str 
         up, down = ranked[-1], ranked[0]
         glance.append(("↕️", f"Biggest riser on your list: {e(up[1]['name'])} (+{up[0]:.1%}). "
                              f"Biggest faller: {e(down[1]['name'])} ({down[0]:.1%})."))
+    if coming:
+        first = coming[0]
+        when = "today" if first["day"] == today else "on " + _day(first["day"])
+        more = f", and {len(coming) - 1} more in the next two weeks" if len(coming) > 1 else ""
+        glance.append(("🗓️", f"Coming up: {e(first['what'])} {when}{more}."))
     n_filed = sum(len(v) for v in filed.values())
     if n_filed:
         glance.append(("📄", f"<b>{n_filed} official announcement{'s' if n_filed != 1 else ''}</b> from {len(filed)} of your "
@@ -346,12 +448,26 @@ def page(state: dict, news_by: dict[str, list[dict]], adverts: int, newest: str 
     parts = ["<header class='top'><h1>Your morning briefing</h1>"
              f"<p class='sub'>{e(updated or state.get('made', ''))} · prices up to {last_day}"
              f"{' · news up to ' + e(_local(newest)) if newest else ''}</p></header>",
-             "<nav><a href='#glance'>At a glance</a><a href='#mine'>My stocks</a><a href='#market'>Market</a><a href='#alerts'>Alerts</a>"
+             "<nav><a href='#glance'>At a glance</a><a href='#coming'>Coming up</a><a href='#mine'>My stocks</a><a href='#market'>Market</a><a href='#alerts'>Alerts</a>"
              "<a href='#movers'>Movers</a><a href='#news'>News</a><a href='#words'>Words explained</a></nav>",
              "<h2 id='glance'>At a glance</h2><div class='card glance'><ul>"
              + "".join(f"<li data-icon='{icon}'>{text}</li>" for icon, text in glance) + "</ul></div>",
              "<p class='small muted'>This page helps you stay informed. It doesn't tell you to buy or sell: none of the "
              "ideas tested so far beat the market once the news was public.</p>"]
+
+    # ---- coming up
+    parts.append("<h2 id='coming'>Coming up</h2><p class='sub'>Dates in the next two weeks that often move these stocks.</p>"
+                 "<div class='card mine'>")
+    if not coming:
+        parts.append("<p class='muted'>Nothing scheduled in the next two weeks.</p>")
+    for c in coming:
+        when = "Today" if c["day"] == today else _day(c["day"])
+        star = f" data-coming='{e(c['ticker'])}'" if c.get("ticker") else ""
+        parts.append(f"<div class='line'{star}><span>{e(c['what'])}</span><span class='small muted num'>{when}</span></div>")
+    parts.append("</div><details class='help'><summary>Why do these dates matter?</summary><p>A company's results day is when "
+                 "its share price usually moves most, up or down, and suppliers often move with their big customers. "
+                 "Results dates are estimates until the company confirms them, and they can change. Knowing a date is "
+                 "coming is a reason to expect bigger swings, not a reason to buy or sell.</p></details>")
 
     # ---- my stocks (chosen in the page with the + button; remembered by this browser)
     parts.append("<h2 id='mine'>My stocks</h2><p class='sub'>The companies you own or care most about, shown first.</p>"
@@ -359,7 +475,26 @@ def page(state: dict, news_by: dict[str, list[dict]], adverts: int, newest: str 
                  "<p id='mine-empty' class='muted'>None chosen yet. Tap the button to pick your companies.</p>"
                  "<button class='add' id='mine-add' type='button'>+ Add or remove companies</button>"
                  "<div class='picker' id='mine-picker'></div>"
-                 "<p class='small muted' id='mine-note'>Your choice is remembered on this device only.</p></div>")
+                 "<p class='small muted' id='mine-note'>Your choice is remembered on this device only.</p></div>"
+                 "<div class='card'><h3>My holdings</h3><p class='small muted'>What you own. It stays on this device and is "
+                 "never uploaded.</p><div id='hold-total'></div><div id='hold-list' class='mine'></div><div id='hold-warn'></div>"
+                 "<div class='form'><select id='hold-ticker' aria-label='Company'></select>"
+                 "<input id='hold-shares' type='number' inputmode='decimal' min='0' step='any' placeholder='Shares'>"
+                 "<input id='hold-cost' type='number' inputmode='decimal' min='0' step='any' placeholder='Price paid ($)'>"
+                 "<button class='add' id='hold-add' type='button'>+ Add holding</button></div></div>"
+                 "<div class='card'><h3>My decisions</h3><p class='small muted'>Each time you buy, sell or decide to wait, "
+                 "write one line on why. Later, this shows how the decision turned out. It stays on this device.</p>"
+                 "<div id='journal-list' class='mine'></div>"
+                 "<div class='form'><select id='journal-ticker' aria-label='Company'></select>"
+                 "<select id='journal-action' aria-label='What you did'><option>Bought</option><option>Sold</option>"
+                 "<option>Decided to wait</option></select>"
+                 "<input id='journal-note' type='text' maxlength='300' placeholder='Why? One line.'>"
+                 "<button class='add' id='journal-add' type='button'>+ Add decision</button></div>"
+                 "<details class='help'><summary>Back up or move my data</summary><p>Your stocks, holdings and decisions "
+                 "live only in this browser. Copy the text below somewhere safe now and then. To restore or move to another "
+                 "device, paste it here and tap Load.</p><textarea id='backup-text' rows='4'></textarea>"
+                 "<button class='add' id='backup-load' type='button'>Load</button> <span id='backup-note' class='small muted'>"
+                 "</span></details></div>")
 
     # ---- the market
     parts.append("<h2 id='market'>The market</h2><p class='sub'>How the wider market moved, as background for your stocks.</p>"
@@ -450,7 +585,8 @@ def page(state: dict, news_by: dict[str, list[dict]], adverts: int, newest: str 
                      + (f"<div class='tone'>{bar}</div>" if found else "") + "</summary>")
         if filings:
             parts.append("<div class='official'><b>Official announcements</b><ul>" + "".join(
-                f"<li><span class='muted small'>{_day(f['day'])}</span> {_link(f['what'], f['url'])}</li>"
+                f"<li><span class='muted small'>{_day(f['day'])}</span> {_link(f['what'], f['url'])}"
+                + (f"<span class='why'>{e(f['short'])}</span>" if f.get("short") else "") + "</li>"
                 for f in filings[:PER_STOCK]) + "</ul></div>")
         if ticker in short:
             parts.append(f"<div class='inshort'><b>In short (written by AI from the articles below)</b>{e(short[ticker])}</div>")
@@ -495,9 +631,13 @@ def page(state: dict, news_by: dict[str, list[dict]], adverts: int, newest: str 
                                 + ". To choose, run on your Mac: <code>uv run event-model briefing --summaries NVDA MSFT</code></p>")
                  + "<p>Made by your event model on your Mac. It informs your own decisions; it isn't financial advice.</p></footer>")
     data = {c["ticker"]: {"name": c["name"], "what": LAYERS.get(c["layer"], c["layer"].replace("_", " ")),
+                          "close": moves.get(c["ticker"], {}).get("close"),
                           "d1": moves.get(c["ticker"], {}).get(1), "d5": moves.get(c["ticker"], {}).get(5),
                           "news": page_data.get(c["ticker"], "")} for c in companies}
-    parts.append("<script>const STOCKS = " + json.dumps(data).replace("</", "<\\/") + ";" + SCRIPT + "</script>")
+    market = {"day": state.get("last_day"), "label": last_day, "qqq": moves.get("QQQ", {}).get("close"),
+              "qqq_d1": moves.get("QQQ", {}).get(1)}
+    parts.append("<script>const STOCKS = " + json.dumps(data).replace("</", "<\\/") + "; const MARKET = "
+                 + json.dumps(market) + ";" + SCRIPT + "</script>")
 
     page = ("<!doctype html><html lang='en'><head><meta charset='utf-8'>"
             "<meta name='viewport' content='width=device-width, initial-scale=1'>"
@@ -666,6 +806,63 @@ def update_prices(state: dict, key: str, now: datetime, get, wait) -> int:
     return added
 
 
+NTFY_URL = "https://ntfy.sh/"
+
+
+def push(topic: str | None, title: str, text: str, click: str | None = None, post=None) -> str | None:
+    """A notification to your phone through ntfy (free; your phone's ntfy app is subscribed to a
+    topic name only you know). Returns None if sent or switched off, else what went wrong."""
+    if not topic:
+        return None
+    headers = {"Title": title.encode("ascii", "ignore").decode(), "Tags": "chart_with_upwards_trend"}
+    if click:
+        headers["Click"] = click
+    try:
+        if post:
+            post(NTFY_URL + topic, text, headers)
+        else:
+            request = urllib.request.Request(NTFY_URL + topic, data=text.encode("utf-8"), headers=headers, method="POST")
+            urllib.request.urlopen(request, timeout=30).close()
+    except Exception as e:
+        return str(e)
+    return None
+
+
+def big_movers(state: dict) -> list[str]:
+    """Watchlist stocks whose last daily move was at least the state's big-move size, biggest first."""
+    names = {c["ticker"]: c["name"] for c in state["companies"]}
+    limit = float(state.get("big_move", 0.05))
+    found = [(m.get("1"), t) for t, m in state["moves"].items() if t in names and m.get("1") is not None
+             and abs(m["1"]) >= limit]
+    return [f"{names[t]} {change:+.1%}" for change, t in sorted(found, key=lambda x: -abs(x[0]))]
+
+
+def notify_changes(state: dict, topic: str | None, post=None) -> list[str]:
+    """Tell the phone what's new, each thing once (state["notified"] remembers): a new day's big
+    movers, and dated events that are today or tomorrow. Returns what was sent."""
+    if not topic:
+        return []
+    told = state.setdefault("notified", {})
+    sent = []
+    day, today = state.get("last_day"), state.get("today") or ""
+    if day and told.get("prices") != day:
+        movers = big_movers(state)
+        if movers and told.get("prices") is not None:
+            more = f" and {len(movers) - 6} more" if len(movers) > 6 else ""
+            if not push(topic, f"Big moves on {_day(day)}", ", ".join(movers[:6]) + more + ".", state.get("site_url"), post):
+                sent.append("movers")
+        told["prices"] = day
+    if today and told.get("coming") != today:
+        tomorrow = (datetime.strptime(today, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+        soon = [("Today: " if c["day"] == today else "Tomorrow: ") + c["what"] for c in state.get("coming") or []
+                if c["day"] in (today, tomorrow)]
+        if soon and told.get("coming") is not None:
+            if not push(topic, "Coming up", ". ".join(soon[:6]) + ".", state.get("site_url"), post):
+                sent.append("coming")
+        told["coming"] = today
+    return sent
+
+
 FRED_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id="
 
 
@@ -700,7 +897,8 @@ def update_mood(state: dict, get_text=None) -> bool:
     return True
 
 
-def refresh(folder: str, key: str, now: datetime | None = None, get=None, wait=None, get_text=None) -> str:
+def refresh(folder: str, key: str, now: datetime | None = None, get=None, wait=None, get_text=None,
+            topic: str | None = None, post=None) -> str:
     """Rebuild index.html in a folder from its state.json, with fresh news and any new day's
     closing prices. Returns a summary."""
     now = now or datetime.now(timezone.utc)
@@ -722,7 +920,10 @@ def refresh(folder: str, key: str, now: datetime | None = None, get=None, wait=N
     except Exception as e:           # so is the mood
         new_mood = False
         print(f"(mood not refreshed: {e})")
-    if new_days or new_mood:
+    local_now = now + timedelta(seconds=int(state.get("utc_offset", 0)))
+    state["today"] = local_now.strftime("%Y-%m-%d")
+    sent = notify_changes(state, topic, post)
+    if new_days or new_mood or topic:
         with open(os.path.join(folder, "state.json"), "w", encoding="utf-8") as f:
             json.dump(state, f)
     window = (now - timedelta(days=int(state.get("news_days", 3)))).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -733,6 +934,7 @@ def refresh(folder: str, key: str, now: datetime | None = None, get=None, wait=N
     news_by, adverts = split_rows(rows, state.get("names") or {})
     newest = max((r["published_utc"] for r in rows), default=None)
     local = now + timedelta(seconds=int(state.get("utc_offset", 0)))
+    state["today"] = local.strftime("%Y-%m-%d")
     updated = local.strftime("%A %d %B %Y").replace(" 0", " ") + ", news refreshed " + local.strftime("%H:%M")
     html_page, counts = page(state, news_by, adverts, newest, published=True, updated=updated)
     with open(os.path.join(folder, "news.json"), "w", encoding="utf-8") as f:
@@ -741,7 +943,8 @@ def refresh(folder: str, key: str, now: datetime | None = None, get=None, wait=N
         f.write(html_page)
     return (f"{len(fresh)} new rows; {counts['articles']} articles about {counts['stocks']} stocks on the page; "
             f"{new_days} new day{'s' if new_days != 1 else ''} of prices (to {state.get('last_day')}); "
-            f"mood {'updated' if new_mood else 'unchanged'} ({(state.get('mood') or {}).get('day')})")
+            f"mood {'updated' if new_mood else 'unchanged'} ({(state.get('mood') or {}).get('day')}); "
+            f"phone told: {', '.join(sent) or 'nothing new'}")
 
 
 if __name__ == "__main__":
@@ -749,4 +952,4 @@ if __name__ == "__main__":
     api_key = os.environ.get("MASSIVE_API_KEY")
     if not api_key:
         sys.exit("MASSIVE_API_KEY isn't set (add it under the repository's Settings > Secrets and variables > Actions).")
-    print(refresh(sys.argv[1] if len(sys.argv) > 1 else ".", api_key))
+    print(refresh(sys.argv[1] if len(sys.argv) > 1 else ".", api_key, topic=os.environ.get("NTFY_TOPIC") or None))
