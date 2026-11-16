@@ -11,7 +11,11 @@ from __future__ import annotations
 
 import html
 import json
+import os
 import re
+import time
+import urllib.parse
+import urllib.request
 from datetime import datetime, timedelta, timezone
 
 UTC_OFFSET = 0      # seconds east of UTC for the times shown (set from the state: your Mac's time zone)
@@ -570,19 +574,18 @@ def split_rows(rows: list[dict], names: dict[str, list[str]]) -> tuple[dict[str,
     return news_by, adverts
 
 
-def fetch_news(key: str, since_utc: str, watch: set[str], get=None, wait=None) -> list[dict]:
-    """Every article published since a time, as rows for the watchlist stocks. At most 5 requests
-    a minute (the free plan), so pages are 13 seconds apart."""
-    import time
-    import urllib.parse
-    import urllib.request
-
-    def default_get(url: str) -> dict:
+def _getter(key: str):
+    def get(url: str) -> dict:
         request = urllib.request.Request(url, headers={"Authorization": f"Bearer {key}"})
         with urllib.request.urlopen(request, timeout=60) as resp:
             return json.loads(resp.read().decode("utf-8"))
+    return get
 
-    get, wait = get or default_get, wait or time.sleep
+
+def fetch_news(key: str, since_utc: str, watch: set[str], get=None, wait=None) -> list[dict]:
+    """Every article published since a time, as rows for the watchlist stocks. At most 5 requests
+    a minute (the free plan), so pages are 13 seconds apart."""
+    get, wait = get or _getter(key), wait or time.sleep
     url = NEWS_URL + "?" + urllib.parse.urlencode({"published_utc.gte": since_utc, "order": "asc",
                                                    "sort": "published_utc", "limit": 1000})
     rows: list[dict] = []
@@ -597,9 +600,70 @@ def fetch_news(key: str, since_utc: str, watch: set[str], get=None, wait=None) -
     return rows
 
 
+PRICES_URL = "https://api.massive.com/v2/aggs/grouped/locale/us/market/stocks/"
+KEEP_DAYS = 25            # trading days of closes carried in the state
+CLOSE_READY = (16, 10)    # New York time after which a day's closing prices are asked for
+
+
+def moves_from_closes(closes: dict[str, list], calendar: str = "QQQ") -> tuple[str | None, dict[str, dict]]:
+    """The latest trading day and each ticker's last close and change over 1, 5 and 20 trading
+    days, from {ticker: [[day, close], ...]} (the same numbers briefing.changes gets from the database)."""
+    days = [d for d, _ in closes.get(calendar, [])]
+    if not days:
+        return None, {}
+    wanted = {n: days[-1 - n] for n in (0, 1, 5, 20) if len(days) > n}
+    moves = {}
+    for ticker, series in closes.items():
+        by_day = dict((d, c) for d, c in series)
+        last = by_day.get(wanted[0])
+        if not last:
+            continue
+        moves[ticker] = {"close": last} | {
+            str(n): (last / by_day[wanted[n]] - 1) if n in wanted and by_day.get(wanted[n]) else None for n in (1, 5, 20)}
+    return days[-1], moves
+
+
+def _new_york(now: datetime) -> datetime:
+    """New York's clock time (US daylight time: second Sunday of March to first Sunday of November)."""
+    year = now.year
+    march = datetime(year, 3, 8, 7, tzinfo=timezone.utc)
+    start = march + timedelta(days=(6 - march.weekday()) % 7)
+    november = datetime(year, 11, 1, 6, tzinfo=timezone.utc)
+    end = november + timedelta(days=(6 - november.weekday()) % 7)
+    return now + timedelta(hours=-4 if start <= now < end else -5)
+
+
+def update_prices(state: dict, key: str, now: datetime, get, wait) -> int:
+    """Add the closing prices of trading days since the state's last one (one request a day, for
+    every stock at once), and work the moves out again. Returns how many days were added."""
+    closes = state.get("closes") or {}
+    last = state.get("last_day")
+    if not closes or not last:
+        return 0
+    local = _new_york(now)
+    final = local.date() if (local.hour, local.minute) >= CLOSE_READY else local.date() - timedelta(days=1)
+    day = datetime.strptime(last, "%Y-%m-%d").date() + timedelta(days=1)
+    added = 0
+    while day <= final and added < 6:
+        if day.weekday() < 5:
+            payload = get(f"{PRICES_URL}{day.isoformat()}?adjusted=true")
+            bars = {b.get("T"): b.get("c") for b in payload.get("results") or []}
+            if bars.get("QQQ"):
+                for ticker, series in closes.items():
+                    if bars.get(ticker):
+                        series.append([day.isoformat(), bars[ticker]])
+                        del series[:-KEEP_DAYS]
+                added += 1
+            wait(13)
+        day += timedelta(days=1)
+    if added:
+        state["last_day"], state["moves"] = moves_from_closes(closes)
+    return added
+
+
 def refresh(folder: str, key: str, now: datetime | None = None, get=None, wait=None) -> str:
-    """Rebuild index.html in a folder from its state.json with fresh news. Returns a summary."""
-    import os
+    """Rebuild index.html in a folder from its state.json, with fresh news and any new day's
+    closing prices. Returns a summary."""
     now = now or datetime.now(timezone.utc)
     with open(os.path.join(folder, "state.json"), encoding="utf-8") as f:
         state = json.load(f)
@@ -608,6 +672,15 @@ def refresh(folder: str, key: str, now: datetime | None = None, get=None, wait=N
             cached = json.load(f)
     except (OSError, ValueError):
         cached = []
+    get, wait = get or _getter(key), wait or time.sleep
+    try:
+        new_days = update_prices(state, key, now, get, wait)
+    except Exception as e:           # prices are a bonus: the news refresh carries on without them
+        new_days = 0
+        print(f"(prices not refreshed: {e})")
+    if new_days:
+        with open(os.path.join(folder, "state.json"), "w", encoding="utf-8") as f:
+            json.dump(state, f)
     window = (now - timedelta(days=int(state.get("news_days", 3)))).strftime("%Y-%m-%dT%H:%M:%SZ")
     since = max([r["published_utc"] for r in cached] + [window])
     watch = {c["ticker"] for c in state["companies"]}
@@ -622,11 +695,11 @@ def refresh(folder: str, key: str, now: datetime | None = None, get=None, wait=N
         json.dump(rows, f)
     with open(os.path.join(folder, "index.html"), "w", encoding="utf-8") as f:
         f.write(html_page)
-    return f"{len(fresh)} new rows; {counts['articles']} articles about {counts['stocks']} stocks on the page"
+    return (f"{len(fresh)} new rows; {counts['articles']} articles about {counts['stocks']} stocks on the page; "
+            f"{new_days} new day{'s' if new_days != 1 else ''} of prices (to {state.get('last_day')})")
 
 
 if __name__ == "__main__":
-    import os
     import sys
     api_key = os.environ.get("MASSIVE_API_KEY")
     if not api_key:
