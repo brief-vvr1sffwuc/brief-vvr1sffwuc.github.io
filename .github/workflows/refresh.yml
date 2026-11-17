@@ -14,6 +14,7 @@ jobs:
       - run: python3 refresh.py .
         env:
           MASSIVE_API_KEY: ${{ secrets.MASSIVE_API_KEY }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
       - run: |
           git config user.name briefing
           git config user.email briefing@users.noreply.github.com
