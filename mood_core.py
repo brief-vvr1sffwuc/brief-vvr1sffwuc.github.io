@@ -46,6 +46,26 @@ def parse_series(text: str) -> list[tuple[str, float]]:
     return rows
 
 
+def parse_cboe(text: str) -> list[tuple[str, float]]:
+    """Cboe's daily VIX file: DATE,OPEN,HIGH,LOW,CLOSE with dates as MM/DD/YYYY. Returns
+    (YYYY-MM-DD, close) rows, oldest first."""
+    rows = []
+    reader = csv.reader(io.StringIO(text))
+    header = [h.strip().upper() for h in next(reader, [])]
+    if "DATE" not in header or "CLOSE" not in header:
+        raise MoodError("Cboe's answer isn't the VIX table it should be")
+    at, close = header.index("DATE"), header.index("CLOSE")
+    for row in reader:
+        try:
+            month, day, year = row[at].strip().split("/")
+            rows.append((f"{int(year):04d}-{int(month):02d}-{int(day):02d}", float(row[close])))
+        except (ValueError, IndexError):
+            continue
+    if not rows:
+        raise MoodError("Cboe's VIX table is empty")
+    return sorted(rows)
+
+
 def _percentile(earlier: list[float], value: float) -> float:
     """The share (0-100) of the earlier values that are lower than this one."""
     ordered = sorted(earlier)
