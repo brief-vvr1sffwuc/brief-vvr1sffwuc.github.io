@@ -2,6 +2,7 @@ name: Refresh the news
 on:
   schedule:
     - cron: "17 */3 * * *"
+    - cron: "47 13-21 * * 1-5"
   workflow_dispatch:
 permissions:
   contents: write
