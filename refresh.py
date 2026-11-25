@@ -979,19 +979,31 @@ def extend_index(index: list[tuple[str, float]], qqq: list) -> tuple[list[tuple[
     return index + [(d, last_value * closes[d] / base) for d in later], True
 
 
+NDX_KEEP = 1100           # trading days of the Nasdaq-100 carried in the state: enough for the 200-day
+                          # average and the 3-year comparison, in case FRED doesn't answer GitHub
+
+
 def update_mood(state: dict, get_text=None) -> bool:
-    """Work the market mood out again (free, no key): the VIX from Cboe (FRED if Cboe fails), the
-    Nasdaq-100 from FRED, its last day or two estimated from QQQ until FRED posts them. True if the
-    reading moved to a newer day, or an estimated day became official."""
+    """Work the market mood out again (free, no key): the VIX from Cboe (FRED if Cboe fails); the
+    Nasdaq-100 from FRED, or, when FRED doesn't answer, from the copy carried in the state; the
+    days FRED hasn't posted yet estimated from QQQ. True if the reading moved to a newer day, or an
+    estimated day became official."""
     get_text = get_text or _text_getter
     try:
         vix = mood_core.parse_cboe(get_text(CBOE_VIX))
     except Exception as e:
         print(f"(Cboe's VIX file not read, using FRED's: {e})")
         vix = mood_core.parse_series(get_text(FRED_URL + "VIXCLS"))
-    index = mood_core.parse_series(get_text(FRED_URL + "NASDAQ100"))
-    official = index[-1][0] if index else ""
+    try:
+        index = mood_core.parse_series(get_text(FRED_URL + "NASDAQ100"))[-NDX_KEEP:]
+        official = index[-1][0]
+    except Exception as e:
+        if not state.get("ndx"):
+            raise
+        print(f"(FRED's Nasdaq-100 not read, using the copy kept since {state.get('ndx_official')}: {e})")
+        index, official = [tuple(r) for r in state["ndx"]], state.get("ndx_official", "")
     index, _ = extend_index(index, (state.get("closes") or {}).get("QQQ") or [])
+    state["ndx"], state["ndx_official"] = [list(r) for r in index[-NDX_KEEP:]], official
     readings = mood_core.compute(vix, index)
     if not readings:
         return False
@@ -1177,6 +1189,8 @@ def merge_states(mac: dict, site: dict) -> dict:
         out |= {k: site[k] for k in ("last_day", "closes", "moves") if k in site}
     if ((site.get("mood") or {}).get("day") or "") > ((mac.get("mood") or {}).get("day") or ""):
         out["mood"] = site["mood"]
+    if (site.get("ndx_official") or "") > (mac.get("ndx_official") or "") or (not mac.get("ndx") and site.get("ndx")):
+        out |= {"ndx": site["ndx"], "ndx_official": site.get("ndx_official", "")}
     since = (datetime.strptime(mac["today"], "%Y-%m-%d") - timedelta(days=int(mac.get("filing_days", 7)))).strftime("%Y-%m-%d")
     filed: dict[str, dict[str, dict]] = {}
     for source in (site.get("filed") or {}, mac.get("filed") or {}):
