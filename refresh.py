@@ -881,9 +881,9 @@ NTFY_URL = "https://ntfy.sh/"
 def push(topic: str | None, title: str, text: str, click: str | None = None, post=None) -> str | None:
     """A notification to your phone through ntfy (free; your phone's ntfy app is subscribed to a
     topic name only you know). Returns None if sent or switched off, else what went wrong.
-    With NTFY_TOKEN set (a free ntfy.sh account's access token), messages count against that
-    account's daily quota instead of the sending machine's address, which GitHub's and Google's
-    servers share with many other users."""
+    ntfy.sh allows 250 messages a day per sending address, and GitHub's servers share addresses with
+    other users. NTFY_TOKEN (an ntfy.sh access token) is sent if set, but only a paid ntfy tier moves
+    the limit from the address to the account; a free account doesn't."""
     if not topic:
         return None
     headers = {"Title": title.encode("ascii", "ignore").decode(), "Tags": "chart_with_upwards_trend"}
@@ -942,7 +942,8 @@ FRED_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id="
 # (FRED copies it about a day later). Cboe's delayed intraday quote isn't used: it sits behind a
 # Cloudflare check that turns programs away (seen 2026-11-25).
 CBOE_VIX = "https://cdn-api.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv"
-VIX_REARM = 3.0           # after an alert, the VIX must fall this far below the line before the next one
+VIX_REARM = 3.0           # the VIX must fall this far below the first line before the alerts start again from it
+VIX_STEP = 5.0            # after an alert, the next one waits for the VIX to rise this much further
 
 
 def mood_dict(m, allowed: dict | None) -> dict:
@@ -1009,24 +1010,27 @@ def latest_vix(state: dict) -> tuple[float | None, str]:
 
 
 def vix_alert(state: dict, topic: str | None, post=None) -> bool:
-    """Tell the phone once when the VIX closes at or above the alert line ([briefing] vix_alert, 30
-    unless changed); the next alert waits until it has closed VIX_REARM points below the line."""
+    """Tell the phone when the VIX closes at or above the alert line ([briefing] vix_alert, 30 unless
+    changed), then only at each further VIX_STEP (35, 40, ...), never twice for the same level. Once it
+    has closed VIX_REARM points below the first line, the alerts start again from it."""
     value, when = latest_vix(state)
     line = float(state.get("vix_alert", 30) or 0)
     if not topic or value is None or not line:          # vix_alert = 0 switches it off
         return False
     told = state.setdefault("notified", {})
     if value < line - VIX_REARM:
-        told["vix_armed"] = True
+        told["vix_told"] = 0
         return False
-    if value < line or told.get("vix_armed") is False:
+    done = float(told.get("vix_told") or 0)
+    if value < (done + VIX_STEP if done else line):
         return False
-    text = (f"The VIX fear index is {value:.1f}. Investors are paying up for protection against falls, and big daily "
-            f"swings are likely for a while. It's context, not a signal: in your test, fearful markets didn't "
-            f"reliably lead to better or worse returns.")
-    if push(topic, f"VIX closed at {value:.1f}: the market is fearful", text, state.get("site_url"), post):
+    level = line + VIX_STEP * int((value - line) // VIX_STEP)
+    text = (f"The VIX fear index closed at {value:.1f}. Investors are paying up for protection against falls, and big "
+            f"daily swings are likely for a while. It's context, not a signal: in your test, fearful markets didn't "
+            f"reliably lead to better or worse returns. Next alert if it reaches {level + VIX_STEP:g}.")
+    if push(topic, f"VIX closed at {value:.1f}, past {level:g}", text, state.get("site_url"), post):
         return False                      # not sent: try again next time
-    told["vix_armed"], told["vix_day"] = False, when
+    told["vix_told"], told["vix_day"] = level, when
     return True
 
 
