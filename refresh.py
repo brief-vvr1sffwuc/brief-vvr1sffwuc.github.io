@@ -510,7 +510,7 @@ def page(state: dict, news_by: dict[str, list[dict]], adverts: int, newest: str 
             parts.append(f"<div class='card tile'><div class='name'>{label}</div><div class='big'>{_pct(m[1])}</div>"
                          f"<div class='small muted'>on {last_day} · {what}</div>"
                          f"<div class='small'>Last 5 days {_pct(m[5])} · last 20 days {_pct(m[20])}</div></div>")
-    parts.append("</div>" + _mood_card(mood_now, state.get("vix_now"), state.get("vix_alert")))
+    parts.append("</div>" + _mood_card(mood_now, state.get("vix_alert")))
 
     # ---- alerts
     parts.append(f"<h2 id='alerts'>Alerts</h2><p class='sub'>Things that changed at the companies you follow, in the last "
@@ -657,25 +657,14 @@ def vix_words(value: float) -> str:
     return "calm" if value < 20 else "nervous" if value < 30 else "fearful"
 
 
-def _vix_line(m: dict, vix_now: dict | None, line: float | None) -> str:
-    """The VIX itself, as fresh as the state has it."""
-    value = (vix_now or {}).get("value")
-    when = (vix_now or {}).get("time", "")
-    if value and when[:10] >= m["day"]:
-        clock = when[11:16]
-        stamp = (f"{_day(when[:10])}, {clock} New York time, 15 minutes delayed" if clock and clock < "16:15"
-                 else f"close on {_day(when[:10])}")
-        main = f"<b>{value:.1f}</b> <span class='muted small'>{stamp}</span>"
-        before = f" · {m['vix']:.1f} at the close on {_day(m['day'])}" if when[:10] > m["day"] else ""
-    else:
-        value = m["vix"]
-        main = f"<b>{value:.1f}</b> <span class='muted small'>close on {_day(m['day'])}</span>"
-        before = ""
-    alert = f" Your phone gets an alert when it reaches {line:g}." if line else ""
-    return (f"<p>VIX fear index: {main}<span class='muted small'>{before}</span> — {vix_words(value)}.{alert}</p>")
+def _vix_line(m: dict, line: float | None) -> str:
+    """The VIX itself, at the last close."""
+    alert = f" Your phone gets an alert when it closes at {line:g} or higher." if line else ""
+    return (f"<p>VIX fear index: <b>{m['vix']:.1f}</b> <span class='muted small'>close on {_day(m['day'])}</span> — "
+            f"{vix_words(m['vix'])}.{alert}</p>")
 
 
-def _mood_card(m: dict | None, vix_now: dict | None = None, line: float | None = None) -> str:
+def _mood_card(m: dict | None, line: float | None = None) -> str:
     if not m:
         return ""
     colour = "neg" if m["label"] == "Greed" else "pos" if m["label"] == "Fear" else "neu"
@@ -688,7 +677,7 @@ def _mood_card(m: dict | None, vix_now: dict | None = None, line: float | None =
             f"<span class='muted small'>{m['score']:.0f} of 100 · {_day(m['day'])}</span></div>"
             f"<div class='gauge'><i style='left:{min(max(m['score'], 1), 99):.0f}%'></i></div>"
             "<div class='scale'><span>Extreme fear</span><span>Normal</span><span>Extreme greed</span></div>"
-            f"<p>{plain}</p>{_vix_line(m, vix_now, line)}<details class='help'><summary>How is this worked out?</summary>"
+            f"<p>{plain}</p>{_vix_line(m, line)}<details class='help'><summary>How is this worked out?</summary>"
             "<p>The VIX measures how much big swings investors expect in the S&P 500 over the next month, from what they pay "
             "for protection. Roughly: under 20 is calm, 20 to 30 nervous, over 30 fearful.</p>"
             f"<p>At the close on {_day(m['day'])} the VIX was {m['vix']:.1f}, higher than on {m['fear']:.0f}% of the last 3 "
@@ -891,10 +880,15 @@ NTFY_URL = "https://ntfy.sh/"
 
 def push(topic: str | None, title: str, text: str, click: str | None = None, post=None) -> str | None:
     """A notification to your phone through ntfy (free; your phone's ntfy app is subscribed to a
-    topic name only you know). Returns None if sent or switched off, else what went wrong."""
+    topic name only you know). Returns None if sent or switched off, else what went wrong.
+    With NTFY_TOKEN set (a free ntfy.sh account's access token), messages count against that
+    account's daily quota instead of the sending machine's address, which GitHub's and Google's
+    servers share with many other users."""
     if not topic:
         return None
     headers = {"Title": title.encode("ascii", "ignore").decode(), "Tags": "chart_with_upwards_trend"}
+    if os.environ.get("NTFY_TOKEN"):
+        headers["Authorization"] = "Bearer " + os.environ["NTFY_TOKEN"]
     if click:
         headers["Click"] = click
     try:
@@ -945,10 +939,9 @@ def notify_changes(state: dict, topic: str | None, post=None) -> list[str]:
 
 FRED_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id="
 # Cboe, which calculates the VIX, posts each day's close in this file soon after the US close
-# (FRED copies it about a day later). The second address is the 15-minute-delayed reading that
-# Cboe's own quote page uses: not an official interface, so the page manages without it.
+# (FRED copies it about a day later). Cboe's delayed intraday quote isn't used: it sits behind a
+# Cloudflare check that turns programs away (seen 2026-11-25).
 CBOE_VIX = "https://cdn-api.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv"
-CBOE_VIX_NOW = "https://cdn.cboe.com/api/global/delayed_quotes/quotes/_VIX.json"
 VIX_REARM = 3.0           # after an alert, the VIX must fall this far below the line before the next one
 
 
@@ -1009,35 +1002,19 @@ def update_mood(state: dict, get_text=None) -> bool:
     return True
 
 
-def update_vix_now(state: dict, now: datetime, get_text=None) -> float | None:
-    """The VIX right now, 15 minutes delayed, from Cboe's quote page. Kept only if it looks like a
-    VIX reading; otherwise the page keeps showing the last close."""
-    payload = json.loads((get_text or _text_getter)(CBOE_VIX_NOW))
-    data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
-    value = data.get("current_price", data.get("last"))
-    if not isinstance(value, (int, float)) or not 5 <= value <= 150:
-        raise ValueError(f"no VIX reading in Cboe's answer ({str(value)[:20]})")
-    when = str(data.get("last_trade_time") or payload.get("timestamp") or "")[:19]
-    state["vix_now"] = {"value": round(float(value), 2), "time": when, "checked": now.strftime("%Y-%m-%dT%H:%M:%SZ")}
-    return float(value)
-
-
 def latest_vix(state: dict) -> tuple[float | None, str]:
-    """The newest VIX reading the state holds, and when: the delayed quote if it's from the latest
-    trading day or later, else the last close."""
-    now, mood = state.get("vix_now") or {}, state.get("mood") or {}
-    if now.get("value") and now.get("time", "")[:10] >= mood.get("day", ""):
-        return now["value"], now["time"]
+    """The newest VIX close the state holds, and its day."""
+    mood = state.get("mood") or {}
     return mood.get("vix"), mood.get("day", "")
 
 
 def vix_alert(state: dict, topic: str | None, post=None) -> bool:
-    """Tell the phone once when the VIX reaches the alert line ([briefing] vix_alert, 30 unless
-    changed); the next alert waits until it has fallen VIX_REARM points below the line."""
+    """Tell the phone once when the VIX closes at or above the alert line ([briefing] vix_alert, 30
+    unless changed); the next alert waits until it has closed VIX_REARM points below the line."""
     value, when = latest_vix(state)
-    if not topic or value is None:
+    line = float(state.get("vix_alert", 30) or 0)
+    if not topic or value is None or not line:          # vix_alert = 0 switches it off
         return False
-    line = float(state.get("vix_alert") or 30)
     told = state.setdefault("notified", {})
     if value < line - VIX_REARM:
         told["vix_armed"] = True
@@ -1047,9 +1024,9 @@ def vix_alert(state: dict, topic: str | None, post=None) -> bool:
     text = (f"The VIX fear index is {value:.1f}. Investors are paying up for protection against falls, and big daily "
             f"swings are likely for a while. It's context, not a signal: in your test, fearful markets didn't "
             f"reliably lead to better or worse returns.")
-    if push(topic, f"VIX at {value:.1f}: the market is fearful", text, state.get("site_url"), post):
+    if push(topic, f"VIX closed at {value:.1f}: the market is fearful", text, state.get("site_url"), post):
         return False                      # not sent: try again next time
-    told["vix_armed"], told["vix_day"] = False, when[:10]
+    told["vix_armed"], told["vix_day"] = False, when
     return True
 
 
@@ -1196,8 +1173,6 @@ def merge_states(mac: dict, site: dict) -> dict:
         out |= {k: site[k] for k in ("last_day", "closes", "moves") if k in site}
     if ((site.get("mood") or {}).get("day") or "") > ((mac.get("mood") or {}).get("day") or ""):
         out["mood"] = site["mood"]
-    if site.get("vix_now"):
-        out["vix_now"] = site["vix_now"]
     since = (datetime.strptime(mac["today"], "%Y-%m-%d") - timedelta(days=int(mac.get("filing_days", 7)))).strftime("%Y-%m-%d")
     filed: dict[str, dict[str, dict]] = {}
     for source in (site.get("filed") or {}, mac.get("filed") or {}):
@@ -1244,10 +1219,6 @@ def refresh(folder: str, key: str, now: datetime | None = None, get=None, wait=N
     except Exception as e:           # so is the mood
         new_mood = False
         print(f"(mood not refreshed: {e})")
-    try:
-        update_vix_now(state, now, get_text)
-    except Exception as e:           # and the delayed VIX: the last close stands in for it
-        print(f"(VIX now not read: {e})")
     local_now = now + timedelta(seconds=int(state.get("utc_offset", 0)))
     state["today"] = local_now.strftime("%Y-%m-%d")
     env = env or {}
